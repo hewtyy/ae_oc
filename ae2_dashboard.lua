@@ -667,8 +667,10 @@ local function updateDashboard(controller)
   -- Текстовые уведомления о перегрузке типов / памяти
   if percent_types > 90 then
     writeText(3, 27, "[ПРЕДУПРЕЖДЕНИЕ: ТИПЫ ЗАБИТЫ (>90%)]", COLOR_CRIT, 46)
-  elseif percent_bytes > 90 then
+  elseif percent_bytes > 90 and used_bytes <= max_bytes then
     writeText(3, 27, "[ПРЕДУПРЕЖДЕНИЕ: МАЛО ПАМЯТИ (>90%)]", COLOR_WARN, 46)
+  elseif max_bytes > 0 and used_bytes > max_bytes then
+    writeText(3, 27, "Внешнее хранилище активно", COLOR_OK, 46)
   else
     writeText(3, 27, "Ячейки памяти стабильны", COLOR_OK, 46)
   end
