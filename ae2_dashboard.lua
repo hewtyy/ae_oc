@@ -30,11 +30,14 @@ local UPDATE_INTERVAL = 2.0
 local WIDTH = 100
 local HEIGHT = 30
 
--- Настройки емкости ячеек хранения AE2 (для оценки заполненности)
--- Так как OpenComputers API не имеет методов прямого опроса физических ячеек,
--- расчет занятой памяти и типов производится математически на основе всех предметов в сети.
-local CELLS_COUNT = 10       -- Общее количество ячеек памяти во всей сети
-local CELL_SIZE_KB = 64      -- Размер ячеек в килобайтах (1, 4, 16, 64)
+-- Настройки ячеек хранения AE2 (для точной оценки заполненности)
+-- Заполните эту таблицу в соответствии с тем, какие ячейки вставлены в ваши МЭ Накопители.
+local CELLS_SETUP = {
+  { size_kb = 1,  count = 0 },
+  { size_kb = 4,  count = 0 },
+  { size_kb = 16, count = 0 },
+  { size_kb = 64, count = 10 }  -- Пример: 10 ячеек по 64к
+}
 
 -- Лимит пакета автокрафта (сколько предметов за раз запрашивать при дефиците)
 local CRAFT_BATCH_SIZE = 100
@@ -323,6 +326,7 @@ local function updateDashboard(controller)
   local energyPercent = 0
   if max > 0 then
     energyPercent = (stored / max) * 100
+    if energyPercent > 100 then energyPercent = 100 end
   end
   
   -- Вывод информации
@@ -361,11 +365,24 @@ local function updateDashboard(controller)
   local busy_cpus = 0
   
   for _, cpu in ipairs(cpus) do
-    if cpu.busy then
+    -- Пытаемся определить занятость несколькими способами
+    local isBusy = false
+    if cpu.busy or cpu.isActive then
+      isBusy = true
+    elseif cpu.cpu then
+      local ok, out = pcall(cpu.cpu.finalOutput)
+      if ok and out and out.name then
+        isBusy = true
+      end
+    end
+    
+    if isBusy then
       busy_cpus = busy_cpus + 1
     else
       free_cpus = free_cpus + 1
     end
+    -- Сохраняем флаг занятости для дальнейшего использования
+    cpu._isBusy = isBusy
   end
   
   writeText(53, 3, "Всего процессоров: " .. total_cpus, COLOR_TEXT_WHITE, 46)
@@ -376,7 +393,7 @@ local function updateDashboard(controller)
   for i, cpu in ipairs(cpus) do
     local cpuId = cpu.name or ("CPU_" .. i)
     currentCpuIds[cpuId] = true
-    if not cpu.busy then
+    if not cpu._isBusy then
       last_jobs[cpuId] = nil
     end
   end
@@ -389,7 +406,7 @@ local function updateDashboard(controller)
   -- Отображение занятых CPU
   local row = 6
   for i, cpu in ipairs(cpus) do
-    if cpu.busy and row <= 14 then
+    if cpu._isBusy and row <= 14 then
       local jobName = "Загрузка..."
       local progressPercent = nil
       
@@ -471,16 +488,22 @@ local function updateDashboard(controller)
   end
   
   -- Математический расчет байтов
-  local max_bytes = CELLS_COUNT * CELL_SIZE_KB * 1024
-  local type_registration_cost = CELL_SIZE_KB * 8
+  local max_bytes = 0
+  local max_types = 0
+  for _, cell in ipairs(CELLS_SETUP) do
+    max_bytes = max_bytes + (cell.count * cell.size_kb * 1024)
+    max_types = max_types + (cell.count * 63)
+  end
   
-  local used_bytes_types = types_used * type_registration_cost
+  -- 1 байт на тип? На самом деле в AE2 1 тип = 8 бит (1 байт) базовой стоимости, 
+  -- но точная формула зависит от размера ячейки. Для простоты используем среднюю:
   local used_bytes_items = 0
   for _, item in ipairs(items) do
     used_bytes_items = used_bytes_items + math.ceil(item.size / 8)
   end
+  local type_registration_cost = types_used * 8
   
-  local used_bytes = used_bytes_types + used_bytes_items
+  local used_bytes = type_registration_cost + used_bytes_items
   if used_bytes > max_bytes then used_bytes = max_bytes end
   
   local percent_bytes = 0
@@ -488,7 +511,6 @@ local function updateDashboard(controller)
     percent_bytes = (used_bytes / max_bytes) * 100
   end
   
-  local max_types = CELLS_COUNT * 63
   local percent_types = 0
   if max_types > 0 then
     percent_types = (types_used / max_types) * 100
