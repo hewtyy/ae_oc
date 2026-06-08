@@ -33,10 +33,15 @@ local HEIGHT = 30
 -- Настройки ячеек хранения AE2 (для точной оценки заполненности)
 -- Заполните эту таблицу в соответствии с тем, какие ячейки вставлены в ваши МЭ Накопители.
 local CELLS_SETUP = {
-  { size_kb = 1,  count = 0 },
-  { size_kb = 4,  count = 0 },
-  { size_kb = 16, count = 0 },
-  { size_kb = 64, count = 10 }  -- Пример: 10 ячеек по 64к
+  { size_kb = 1,     count = 0 },
+  { size_kb = 4,     count = 0 },
+  { size_kb = 16,    count = 0 },
+  { size_kb = 64,    count = 0 },
+  { size_kb = 256,   count = 57 }, -- Настройки по умолчанию пользователя: 57 ячеек по 256кб
+  { size_kb = 1024,  count = 0 },  -- 1М ячейка
+  { size_kb = 4096,  count = 0 },  -- 4М ячейка
+  { size_kb = 16384, count = 0 },  -- 16М ячейка
+  { size_kb = 65536, count = 0 }   -- 65М ячейка
 }
 
 -- Лимит пакета автокрафта (сколько предметов за раз запрашивать при дефиците)
@@ -121,7 +126,9 @@ end
 -- Функция форматирования количества предметов в сети (К, М)
 local function formatCount(val)
   if not val then return "0" end
-  if val >= 1000000 then
+  if val >= 1000000000 then
+    return string.format("%.2f G", val / 1000000000)
+  elseif val >= 1000000 then
     return string.format("%.2f M", val / 1000000)
   elseif val >= 1000 then
     return string.format("%.1f k", val / 1000)
@@ -301,7 +308,7 @@ local function findCraftable(controller, itemId, damage)
   local ok2, allCraftables = pcall(controller.getCraftables)
   if ok2 and allCraftables then
     for _, craftable in ipairs(allCraftables) do
-      local ok3, stack = pcall(craftable.getItemStack)
+      local ok3, stack = pcall(craftable.getItemStack, craftable)
       if ok3 and stack then
         if stack.name == itemId and (not damage or stack.damage == damage) then
           return craftable
@@ -423,37 +430,41 @@ local function updateDashboard(controller)
 
       -- 1. Сначала пробуем стандартный finalOutput
       if cpu.cpu and cpu.cpu.finalOutput then
-        local ok, out = pcall(cpu.cpu.finalOutput)
-        if ok and out and type(out) == "table" and out.label then
-          main_item_label = out.label
+        local ok, out = pcall(cpu.cpu.finalOutput, cpu.cpu)
+        if ok and out and type(out) == "table" then
+          main_item_label = out.label or out.displayName or out.name
         end
       end
 
       -- 2. Если finalOutput не дал результата, опрашиваем списки
       if not main_item_label and cpu.cpu then
-        local ok_act, act = pcall(cpu.cpu.activeItems)
-        local ok_pend, pend = pcall(cpu.cpu.pendingItems)
-        local ok_store, store = pcall(cpu.cpu.storedItems)
+        local ok_act, act = pcall(cpu.cpu.activeItems, cpu.cpu)
+        local ok_pend, pend = pcall(cpu.cpu.pendingItems, cpu.cpu)
+        local ok_store, store = pcall(cpu.cpu.storedItems, cpu.cpu)
 
-        -- Главный предмет - первый в списке active или pending
+        -- Главный предмет - первый в списке active, pending или stored
         if ok_act and act and #act > 0 then
-          main_item_label = act[1].label
+          main_item_label = act[1].label or act[1].displayName or act[1].name
         elseif ok_pend and pend and #pend > 0 then
-          main_item_label = pend[1].label
+          main_item_label = pend[1].label or pend[1].displayName or pend[1].name
+        elseif ok_store and store and #store > 0 then
+          main_item_label = store[1].label or store[1].displayName or store[1].name
         end
 
         if main_item_label then
           -- Считаем оставшееся количество главного предмета
           if ok_act and act then
             for _, item in ipairs(act) do
-              if item.label == main_item_label then
+              local name = item.label or item.displayName or item.name
+              if name == main_item_label then
                 remaining = remaining + item.size
               end
             end
           end
           if ok_pend and pend then
             for _, item in ipairs(pend) do
-              if item.label == main_item_label then
+              local name = item.label or item.displayName or item.name
+              if name == main_item_label then
                 remaining = remaining + item.size
               end
             end
@@ -461,7 +472,8 @@ local function updateDashboard(controller)
           -- Считаем сколько уже скрафчено и лежит на CPU
           if ok_store and store then
             for _, item in ipairs(store) do
-              if item.label == main_item_label then
+              local name = item.label or item.displayName or item.name
+              if name == main_item_label then
                 stored = stored + item.size
               end
             end
@@ -476,7 +488,8 @@ local function updateDashboard(controller)
           job = {
             label = main_item_label,
             total = remaining + stored,
-            last_remaining = remaining
+            last_remaining = remaining,
+            start_time = now
           }
           cpu_jobs[cpuId] = job
         else
@@ -496,7 +509,26 @@ local function updateDashboard(controller)
           progressPercent = 0
         end
 
-        jobName = string.format("%s (%d/%d)", main_item_label, crafted, job.total)
+        -- Оценка оставшегося времени
+        local time_left_str = ""
+        if remaining > 0 and crafted > 0 then
+          local elapsed = now - job.start_time
+          if elapsed > 5 then
+            local speed = crafted / elapsed -- предметов в секунду
+            if speed > 0 then
+              local seconds_left = remaining / speed
+              if seconds_left < 60 then
+                time_left_str = string.format(" ~%.0fs", seconds_left)
+              elseif seconds_left < 3600 then
+                time_left_str = string.format(" ~%dm", math.ceil(seconds_left / 60))
+              else
+                time_left_str = string.format(" ~%.1fh", seconds_left / 3600)
+              end
+            end
+          end
+        end
+
+        jobName = string.format("%s (%d/%d)%s", main_item_label, crafted, job.total, time_left_str)
       else
         jobName = "Подготовка..."
       end
@@ -603,21 +635,20 @@ local function updateDashboard(controller)
   local bytesBarColor = COLOR_OK
   if percent_bytes > 90 then bytesBarColor = COLOR_CRIT elseif percent_bytes > 75 then bytesBarColor = COLOR_WARN end
   drawProgressBar(3, 20, percent_bytes, 45, bytesBarColor, COLOR_PROGRESS_BG)
-  if max_bytes == 0 then
-    writeText(3, 21, "Использовано: " .. formatBytes(used_bytes) .. " (настройте CELLS_SETUP)", COLOR_WARN, 46)
-  else
+  if max_bytes > 0 and used_bytes > max_bytes then
+    writeText(3, 19, "Память (ячейки): Внешнее (>100%)", COLOR_CRAFTING, 46)
+    drawProgressBar(3, 20, 100, 45, COLOR_CRAFTING, COLOR_PROGRESS_BG)
     writeText(3, 21, "Использовано: " .. formatBytes(used_bytes) .. " / " .. formatBytes(max_bytes), COLOR_TEXT_DEFAULT, 46)
-  end
-  
-  writeText(3, 23, "Типы предметов: " .. string.format("%.1f%%", percent_types), COLOR_TEXT_DEFAULT, 46)
-  local typesBarColor = COLOR_OK
-  if percent_types > 90 then typesBarColor = COLOR_CRIT elseif percent_types > 75 then typesBarColor = COLOR_WARN end
-  drawProgressBar(3, 24, percent_types, 45, typesBarColor, COLOR_PROGRESS_BG)
-  
-  if max_types == 0 then
-    writeText(3, 25, "Использовано типов: " .. types_used, COLOR_WARN, 46)
   else
-    writeText(3, 25, "Использовано: " .. types_used .. " / " .. max_types, COLOR_TEXT_DEFAULT, 46)
+    writeText(3, 19, "Память (ячейки): " .. string.format("%.1f%%", percent_bytes), COLOR_TEXT_DEFAULT, 46)
+    local bytesBarColor = COLOR_OK
+    if percent_bytes > 90 then bytesBarColor = COLOR_CRIT elseif percent_bytes > 75 then bytesBarColor = COLOR_WARN end
+    drawProgressBar(3, 20, percent_bytes, 45, bytesBarColor, COLOR_PROGRESS_BG)
+    if max_bytes == 0 then
+      writeText(3, 21, "Использовано: " .. formatBytes(used_bytes) .. " (настройте CELLS_SETUP)", COLOR_WARN, 46)
+    else
+      writeText(3, 21, "Использовано: " .. formatBytes(used_bytes) .. " / " .. formatBytes(max_bytes), COLOR_TEXT_DEFAULT, 46)
+    end
   end
   
   -- Текстовые уведомления о перегрузке типов / памяти
@@ -666,9 +697,9 @@ local function updateDashboard(controller)
         local isCanceled = false
         
         -- Безопасная проверка статуса
-        local ok1, res1 = pcall(req.isDone)
+        local ok1, res1 = pcall(req.isDone, req)
         if ok1 then isDone = res1 end
-        local ok2, res2 = pcall(req.isCanceled)
+        local ok2, res2 = pcall(req.isCanceled, req)
         if ok2 then isCanceled = res2 end
         
         if isDone or isCanceled then
@@ -685,7 +716,7 @@ local function updateDashboard(controller)
           local craftAmount = math.min(missing, CRAFT_BATCH_SIZE)
           
           -- Запускаем крафт одного пакета
-          local ok, reqObj = pcall(template.request, craftAmount)
+          local ok, reqObj = pcall(template.request, template, craftAmount)
           if ok and reqObj then
             active_craft_requests[res.id] = reqObj
             statusText = "[КРАФТ]"
