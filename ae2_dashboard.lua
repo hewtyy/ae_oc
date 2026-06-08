@@ -616,7 +616,6 @@ local function updateDashboard(controller)
   end
   
   local used_bytes = used_bytes_types + used_bytes_items
-  if max_bytes > 0 and used_bytes > max_bytes then used_bytes = max_bytes end
   
   local percent_bytes = 0
   if max_bytes > 0 then
