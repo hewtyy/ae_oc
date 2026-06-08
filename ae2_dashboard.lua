@@ -638,9 +638,9 @@ local function updateDashboard(controller)
   if percent_bytes > 90 then bytesBarColor = COLOR_CRIT elseif percent_bytes > 75 then bytesBarColor = COLOR_WARN end
   drawProgressBar(3, 20, percent_bytes, 45, bytesBarColor, COLOR_PROGRESS_BG)
   if max_bytes > 0 and used_bytes > max_bytes then
-    writeText(3, 19, "Память (ячейки): Внешнее (>100%)", COLOR_CRAFTING, 46)
+    writeText(3, 19, "Память ячеек: Внешнее хранилище", COLOR_CRAFTING, 46)
     drawProgressBar(3, 20, 100, 45, COLOR_CRAFTING, COLOR_PROGRESS_BG)
-    writeText(3, 21, "Использовано: " .. formatBytes(used_bytes) .. " / " .. formatBytes(max_bytes), COLOR_TEXT_DEFAULT, 46)
+    writeText(3, 21, "Общий объем сети: " .. formatBytes(used_bytes), COLOR_TEXT_DEFAULT, 46)
   else
     writeText(3, 19, "Память (ячейки): " .. string.format("%.1f%%", percent_bytes), COLOR_TEXT_DEFAULT, 46)
     local bytesBarColor = COLOR_OK
@@ -651,6 +651,17 @@ local function updateDashboard(controller)
     else
       writeText(3, 21, "Использовано: " .. formatBytes(used_bytes) .. " / " .. formatBytes(max_bytes), COLOR_TEXT_DEFAULT, 46)
     end
+  end
+  
+  writeText(3, 23, "Типы предметов: " .. string.format("%.1f%%", percent_types), COLOR_TEXT_DEFAULT, 46)
+  local typesBarColor = COLOR_OK
+  if percent_types > 90 then typesBarColor = COLOR_CRIT elseif percent_types > 75 then typesBarColor = COLOR_WARN end
+  drawProgressBar(3, 24, percent_types, 45, typesBarColor, COLOR_PROGRESS_BG)
+  
+  if max_types == 0 then
+    writeText(3, 25, "Использовано типов: " .. types_used, COLOR_WARN, 46)
+  else
+    writeText(3, 25, "Использовано: " .. types_used .. " / " .. max_types, COLOR_TEXT_DEFAULT, 46)
   end
   
   -- Текстовые уведомления о перегрузке типов / памяти
