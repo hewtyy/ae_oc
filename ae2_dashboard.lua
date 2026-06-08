@@ -78,6 +78,9 @@ local last_offline_draw = 0
 -- Ключ: имя CPU или индекс, значение: { jobName = "...", startTime = timestamp }
 local last_jobs = {}
 
+-- Таблица для отслеживания прогресса крафта по процессорам
+local cpu_jobs = {}
+
 -- Таблица для отслеживания текущих запросов крафта, чтобы не спамить ими
 -- Ключ: ID ресурса, значение: объект запроса крафта от AE2
 local active_craft_requests = {}
@@ -410,32 +413,94 @@ local function updateDashboard(controller)
       local jobName = "Загрузка..."
       local progressPercent = nil
       
-      -- Безопасно опрашиваем объект задачи
+      -- Идентификация процессора и вычисление времени выполнения
+      local cpuId = cpu.name or ("CPU_" .. i)
+      local now = computer.uptime()
+      
+      local main_item_label = nil
+      local remaining = 0
+      local stored = 0
+
+      -- 1. Сначала пробуем стандартный finalOutput
       if cpu.cpu and cpu.cpu.finalOutput then
         local ok, out = pcall(cpu.cpu.finalOutput)
-        if ok and out then
-          jobName = out.label or out.name or "Неизвестно"
-          
-          -- Попытка прочитать прогресс
-          if cpu.cpu.getJobProgress then
-            local ok2, prog = pcall(cpu.cpu.getJobProgress)
-            if ok2 and prog then
-              if type(prog) == "number" then
-                progressPercent = prog
-              elseif type(prog) == "table" then
-                if prog.total and prog.total > 0 then
-                  progressPercent = (prog.crafted / prog.total) * 100
-                end
+        if ok and out and type(out) == "table" and out.label then
+          main_item_label = out.label
+        end
+      end
+
+      -- 2. Если finalOutput не дал результата, опрашиваем списки
+      if not main_item_label and cpu.cpu then
+        local ok_act, act = pcall(cpu.cpu.activeItems)
+        local ok_pend, pend = pcall(cpu.cpu.pendingItems)
+        local ok_store, store = pcall(cpu.cpu.storedItems)
+
+        -- Главный предмет - первый в списке active или pending
+        if ok_act and act and #act > 0 then
+          main_item_label = act[1].label
+        elseif ok_pend and pend and #pend > 0 then
+          main_item_label = pend[1].label
+        end
+
+        if main_item_label then
+          -- Считаем оставшееся количество главного предмета
+          if ok_act and act then
+            for _, item in ipairs(act) do
+              if item.label == main_item_label then
+                remaining = remaining + item.size
+              end
+            end
+          end
+          if ok_pend and pend then
+            for _, item in ipairs(pend) do
+              if item.label == main_item_label then
+                remaining = remaining + item.size
+              end
+            end
+          end
+          -- Считаем сколько уже скрафчено и лежит на CPU
+          if ok_store and store then
+            for _, item in ipairs(store) do
+              if item.label == main_item_label then
+                stored = stored + item.size
               end
             end
           end
         end
       end
-      
-      -- Идентификация процессора и вычисление времени выполнения
-      local cpuId = cpu.name or ("CPU_" .. i)
-      local now = computer.uptime()
-      
+
+      if main_item_label then
+        -- Управление состоянием работы для вычисления прогресса
+        local job = cpu_jobs[cpuId]
+        if not job or job.label ~= main_item_label then
+          job = {
+            label = main_item_label,
+            total = remaining + stored,
+            last_remaining = remaining
+          }
+          cpu_jobs[cpuId] = job
+        else
+          local current_total = remaining + stored
+          if current_total > job.total then
+            job.total = current_total
+          end
+          job.last_remaining = remaining
+        end
+
+        local crafted = job.total - remaining
+        if crafted < 0 then crafted = 0 end
+
+        if job.total > 0 then
+          progressPercent = (crafted / job.total) * 100
+        else
+          progressPercent = 0
+        end
+
+        jobName = string.format("%s (%d/%d)", main_item_label, crafted, job.total)
+      else
+        jobName = "Подготовка..."
+      end
+
       if not last_jobs[cpuId] or last_jobs[cpuId].jobName ~= jobName then
         last_jobs[cpuId] = {
           jobName = jobName,
@@ -495,16 +560,31 @@ local function updateDashboard(controller)
     max_types = max_types + (cell.count * 63)
   end
   
-  -- 1 байт на тип? На самом деле в AE2 1 тип = 8 бит (1 байт) базовой стоимости, 
-  -- но точная формула зависит от размера ячейки. Для простоты используем среднюю:
+  -- Базовая стоимость типа в AE2 составляет 1/128 от емкости ячейки.
+  -- Вычисляем среднюю стоимость регистрации типа на основе CELLS_SETUP.
+  local total_cells_count = 0
+  for _, cell in ipairs(CELLS_SETUP) do
+    if cell.count > 0 then
+      total_cells_count = total_cells_count + cell.count
+    end
+  end
+
+  local average_bytes_per_type = 0
+  if total_cells_count > 0 then
+    average_bytes_per_type = max_bytes / (total_cells_count * 128)
+  else
+    -- Fallback на ячейки 64k, если не настроено
+    average_bytes_per_type = 512
+  end
+
+  local used_bytes_types = types_used * average_bytes_per_type
   local used_bytes_items = 0
   for _, item in ipairs(items) do
     used_bytes_items = used_bytes_items + math.ceil(item.size / 8)
   end
-  local type_registration_cost = types_used * 8
   
-  local used_bytes = type_registration_cost + used_bytes_items
-  if used_bytes > max_bytes then used_bytes = max_bytes end
+  local used_bytes = used_bytes_types + used_bytes_items
+  if max_bytes > 0 and used_bytes > max_bytes then used_bytes = max_bytes end
   
   local percent_bytes = 0
   if max_bytes > 0 then
@@ -523,13 +603,22 @@ local function updateDashboard(controller)
   local bytesBarColor = COLOR_OK
   if percent_bytes > 90 then bytesBarColor = COLOR_CRIT elseif percent_bytes > 75 then bytesBarColor = COLOR_WARN end
   drawProgressBar(3, 20, percent_bytes, 45, bytesBarColor, COLOR_PROGRESS_BG)
-  writeText(3, 21, "Использовано: " .. formatBytes(used_bytes) .. " / " .. formatBytes(max_bytes), COLOR_TEXT_DEFAULT, 46)
+  if max_bytes == 0 then
+    writeText(3, 21, "Использовано: " .. formatBytes(used_bytes) .. " (настройте CELLS_SETUP)", COLOR_WARN, 46)
+  else
+    writeText(3, 21, "Использовано: " .. formatBytes(used_bytes) .. " / " .. formatBytes(max_bytes), COLOR_TEXT_DEFAULT, 46)
+  end
   
   writeText(3, 23, "Типы предметов: " .. string.format("%.1f%%", percent_types), COLOR_TEXT_DEFAULT, 46)
   local typesBarColor = COLOR_OK
   if percent_types > 90 then typesBarColor = COLOR_CRIT elseif percent_types > 75 then typesBarColor = COLOR_WARN end
   drawProgressBar(3, 24, percent_types, 45, typesBarColor, COLOR_PROGRESS_BG)
-  writeText(3, 25, "Использовано: " .. types_used .. " / " .. max_types, COLOR_TEXT_DEFAULT, 46)
+  
+  if max_types == 0 then
+    writeText(3, 25, "Использовано типов: " .. types_used, COLOR_WARN, 46)
+  else
+    writeText(3, 25, "Использовано: " .. types_used .. " / " .. max_types, COLOR_TEXT_DEFAULT, 46)
+  end
   
   -- Текстовые уведомления о перегрузке типов / памяти
   if percent_types > 90 then
