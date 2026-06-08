@@ -530,7 +530,7 @@ local function updateDashboard(controller)
 
         jobName = string.format("%s (%d/%d)%s", main_item_label, crafted, job.total, time_left_str)
       else
-        jobName = "Подготовка..."
+        jobName = "[Выполняется крафт]"
       end
 
       if not last_jobs[cpuId] or last_jobs[cpuId].jobName ~= jobName then
@@ -567,9 +567,12 @@ local function updateDashboard(controller)
     end
   end
   
-  -- Очистка пустых строк в списке процессоров
-  for r = row, 14 do
+  -- Очистка пустых строк в списке процессоров и вывод сноски
+  for r = row, 13 do
     writeText(53, r, "", nil, 45)
+  end
+  if row <= 14 then
+    writeText(53, 14, "*Детали крафта не поддерживаются версией OC", COLOR_BORDER, 45)
   end
   
   -- ==========================================
